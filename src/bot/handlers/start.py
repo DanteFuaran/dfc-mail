@@ -1,7 +1,7 @@
 """Обработчик команды /start"""
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart, ChatTypeFilter
+from aiogram.filters import CommandStart
 from aiogram.enums import ChatType
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -125,7 +125,7 @@ async def _get_welcome_text(session: AsyncSession, is_new: bool) -> str:
 # /start в ЛИЧНЫХ СООБЩЕНИЯХ
 # ═══════════════════════════════════════════════
 
-@router.message(CommandStart(), ChatTypeFilter(ChatType.PRIVATE))
+@router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start_private(message: Message, session: AsyncSession):
     """Обработка /start в личных сообщениях — полное меню."""
     user, is_new = await _get_or_create_user(session, message)
@@ -142,7 +142,7 @@ async def cmd_start_private(message: Message, session: AsyncSession):
 # /start в ГРУППАХ — inline-кнопка «Открыть бота»
 # ═══════════════════════════════════════════════
 
-@router.message(CommandStart(), ChatTypeFilter(ChatType.GROUP, ChatType.SUPERGROUP))
+@router.message(CommandStart(), F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def cmd_start_group(message: Message, session: AsyncSession):
     """Обработка /start в группах — кнопка перехода в ЛС + авто-сохранение чата поддержки."""
     user, _ = await _get_or_create_user(session, message)
