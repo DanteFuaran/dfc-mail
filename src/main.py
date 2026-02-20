@@ -73,6 +73,7 @@ async def _on_startup(bot: Bot) -> None:
     logger.info("Инициализация базы данных...")
     await init_db()
     me = await bot.get_me()
+    logger.info("Bot starting up")
     logger.info("Бот запущен: @%s (ID: %s)", me.username, me.id)
 
 
