@@ -1,7 +1,7 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
 # DFC Mail Bot — Автоматический установщик
-# Стиль: dfc-tg-shop
+# Стиль: dfc-remna-install
 # ═══════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -17,20 +17,24 @@ ENV_FILE="$PROJECT_DIR/.env"
 REPO_URL="https://github.com/DanteFuaran/dfc-mail.git"
 REPO_BRANCH="main"
 SYSTEM_INSTALL_DIR="/usr/local/lib/dfc-mail"
-SCRIPT_CWD="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_CWD="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 
 INSTALL_STARTED=false
 INSTALL_COMPLETED=false
 SOURCE_DIR=""
 CLONE_DIR=""
 
-# Читаем ветку из version
+SCRIPT_VERSION="1.0.0"
+
+# Читаем ветку/версию из version
 for _uf in "$PROJECT_DIR/version" "$SCRIPT_CWD/version"; do
     if [ -f "$_uf" ]; then
         _br=$(grep '^branch:' "$_uf" | cut -d: -f2 | tr -d ' \n')
         _ru=$(grep '^repo:'   "$_uf" | cut -d: -f2- | tr -d ' \n')
+        _sv=$(grep '^version:' "$_uf" | cut -d: -f2 | tr -d ' \n')
         [ -n "$_br" ] && REPO_BRANCH="$_br"
         [ -n "$_ru" ] && REPO_URL="$_ru"
+        [ -n "$_sv" ] && SCRIPT_VERSION="$_sv"
         break
     fi
 done
@@ -50,13 +54,22 @@ NC='\033[0m'
 # ═══════════════════════════════════════════════
 # ВОССТАНОВЛЕНИЕ ТЕРМИНАЛА
 # ═══════════════════════════════════════════════
+ORIGINAL_STTY=$(stty -g 2>/dev/null || echo "")
+
 cleanup_terminal() {
-    stty sane 2>/dev/null || true
     tput cnorm 2>/dev/null || true
+    tput sgr0 2>/dev/null || true
+    printf "\033[0m\033[?25h" 2>/dev/null || true
+    if [ -n "$ORIGINAL_STTY" ]; then
+        stty "$ORIGINAL_STTY" 2>/dev/null || stty sane 2>/dev/null || true
+    else
+        stty sane 2>/dev/null || true
+    fi
 }
 
 handle_interrupt() {
     cleanup_terminal
+    clear
     echo
     echo -e "${RED}⚠️  Скрипт был остановлен пользователем${NC}"
     echo
@@ -94,28 +107,6 @@ show_spinner() {
     return $exit_code
 }
 
-show_spinner_timer() {
-    local seconds=$1
-    local msg="$2"
-    local done_msg="${3:-$msg}"
-    local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local i=0
-    local delay=0.08
-    local elapsed=0
-    tput civis 2>/dev/null || true
-    while [ $elapsed -lt $seconds ]; do
-        local remaining=$((seconds - elapsed))
-        for ((j=0; j<12; j++)); do
-            printf "\r\033[K${GREEN}%s${NC}  %s (%d сек)" "${spin[$i]}" "$msg" "$remaining"
-            sleep $delay
-            i=$(( (i+1) % 10 ))
-        done
-        ((elapsed++)) || true
-    done
-    printf "\r\033[K${GREEN}✅${NC} %s\n" "$done_msg"
-    tput cnorm 2>/dev/null || true
-}
-
 show_spinner_until_log() {
     local container="$1"
     local pattern="$2"
@@ -130,7 +121,7 @@ show_spinner_until_log() {
     tput civis 2>/dev/null || true
 
     while [ $elapsed -lt $timeout ]; do
-        printf "\r${GREEN}%s${NC}  %s (%d/%d сек)" "${spin[$i]}" "$msg" "$elapsed" "$timeout"
+        printf "\r${DARKGRAY}%s  %s (%d/%d сек)${NC}" "${spin[$i]}" "$msg" "$elapsed" "$timeout"
         i=$(( (i+1) % 10 ))
         sleep $delay
         loop_count=$((loop_count + 1))
@@ -160,65 +151,125 @@ show_spinner_until_log() {
 }
 
 # ═══════════════════════════════════════════════
-# МЕНЮ СО СТРЕЛОЧКАМИ
+# МЕНЮ СО СТРЕЛОЧКАМИ (стиль dfc-remna-install)
 # ═══════════════════════════════════════════════
 show_arrow_menu() {
+    set +e
     local title="$1"
     shift
     local options=("$@")
     local num_options=${#options[@]}
     local selected=0
+    local original_stty=""
+    original_stty=$(stty -g 2>/dev/null || echo "")
 
     tput civis 2>/dev/null || true
-    stty -echo 2>/dev/null || true
+    stty -icanon -echo min 1 time 0 2>/dev/null || true
+
+    _restore_term() {
+        if [ -n "${original_stty:-}" ]; then
+            stty "$original_stty" 2>/dev/null || stty sane 2>/dev/null || true
+        else
+            stty sane 2>/dev/null || true
+        fi
+        tput cnorm 2>/dev/null || true
+    }
+    trap "_restore_term" RETURN
 
     while true; do
-        # Очистка
-        printf "\033[2J\033[H"
+        clear
         echo -e "${BLUE}══════════════════════════════════════${NC}"
-        echo -e "${WHITE}  $title${NC}"
+        echo -e "${GREEN}   $title${NC}"
         echo -e "${BLUE}══════════════════════════════════════${NC}"
         echo
 
         for i in "${!options[@]}"; do
-            if [ "$i" -eq "$selected" ]; then
-                echo -e "  ${GREEN}▸ ${options[$i]}${NC}"
+            if [[ "${options[$i]}" =~ ^[─━═[:space:]]*$ ]]; then
+                echo -e "${DARKGRAY}${options[$i]}${NC}"
+            elif [ $i -eq $selected ]; then
+                echo -e "${BLUE}▶${NC} ${YELLOW}${options[$i]}${NC}"
             else
-                echo -e "    ${GRAY}${options[$i]}${NC}"
+                echo -e "  ${options[$i]}"
             fi
         done
 
         echo
-        echo -e "${DARKGRAY}↑↓ — выбор  |  Enter — подтвердить${NC}"
+        echo -e "${BLUE}══════════════════════════════════════${NC}"
+        echo -e "${DARKGRAY}Используйте ↑↓ для навигации, Enter для выбора${NC}"
+        echo
 
-        read -rsn1 key
-        case "$key" in
-            $'\x1b')
-                read -rsn2 key2
-                case "$key2" in
-                    '[A') selected=$(( (selected - 1 + num_options) % num_options )) ;;
-                    '[B') selected=$(( (selected + 1) % num_options )) ;;
+        local key
+        read -rsn1 key 2>/dev/null || key=""
+
+        if [[ "$key" == $'\e' ]]; then
+            local seq1="" seq2=""
+            read -rsn1 -t 0.1 seq1 2>/dev/null || seq1=""
+            if [[ "$seq1" == '[' ]]; then
+                read -rsn1 -t 0.1 seq2 2>/dev/null || seq2=""
+                case "$seq2" in
+                    'A')
+                        ((selected--))
+                        [ $selected -lt 0 ] && selected=$((num_options - 1))
+                        while [[ "${options[$selected]}" =~ ^[─═[:space:]]*$ ]]; do
+                            ((selected--))
+                            [ $selected -lt 0 ] && selected=$((num_options - 1))
+                        done
+                        ;;
+                    'B')
+                        ((selected++))
+                        [ $selected -ge $num_options ] && selected=0
+                        while [[ "${options[$selected]}" =~ ^[─═[:space:]]*$ ]]; do
+                            ((selected++))
+                            [ $selected -ge $num_options ] && selected=0
+                        done
+                        ;;
                 esac
-                ;;
-            '') break ;;
-        esac
+            fi
+        else
+            local key_code
+            if [ -n "$key" ]; then
+                key_code=$(printf '%d' "'$key" 2>/dev/null || echo 0)
+            else
+                key_code=13
+            fi
+            if [ "$key_code" -eq 10 ] || [ "$key_code" -eq 13 ]; then
+                _restore_term
+                return $selected
+            fi
+        fi
     done
-
-    stty echo 2>/dev/null || true
-    tput cnorm 2>/dev/null || true
-    return $selected
 }
 
 # ═══════════════════════════════════════════════
-# ВВОД ПОЛЬЗОВАТЕЛЯ
+# ВВОД ТЕКСТА (стиль dfc-remna-install)
 # ═══════════════════════════════════════════════
 reading_inline() {
     local prompt="$1"
     local var_name="$2"
-    tput cnorm 2>/dev/null || true
-    stty echo 2>/dev/null || true
-    echo -ne "${WHITE}${prompt} ${NC}"
-    read -r "$var_name"
+    local input=""
+    local char
+    echo -en "${BLUE}➜${NC}  ${YELLOW}${prompt}${NC} "
+    while IFS= read -r -s -n1 char; do
+        if [[ -z "$char" ]]; then
+            break
+        elif [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
+            if [[ -n "$input" ]]; then
+                input="${input%?}"
+                echo -en "\b \b"
+            fi
+        elif [[ "$char" == $'\x1b' ]]; then
+            local _seq=""
+            while IFS= read -r -s -n1 -t 0.1 _sc; do
+                _seq+="$_sc"
+                [[ "$_sc" =~ [A-Za-z~] ]] && break
+            done
+        else
+            input+="$char"
+            echo -en "$char"
+        fi
+    done
+    echo
+    printf -v "$var_name" '%s' "$input"
 }
 
 update_env_var() {
@@ -235,65 +286,49 @@ generate_password() {
 }
 
 # ═══════════════════════════════════════════════
-# ПРОВЕРКА: УСТАНОВЛЕН ЛИ УЖЕ БОТ
+# ПРОВЕРКА УСТАНОВКИ
 # ═══════════════════════════════════════════════
 is_installed() {
     [ -d "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/docker-compose.yml" ] && [ -f "$PROJECT_DIR/.env" ]
 }
 
 # ═══════════════════════════════════════════════
-# УПРАВЛЕНИЕ БОТОМ (если установлен)
+# УПРАВЛЕНИЕ БОТОМ
 # ═══════════════════════════════════════════════
 manage_restart() {
     cd "$PROJECT_DIR" || return
-    (
-        docker compose down >/dev/null 2>&1
-        docker compose up -d >/dev/null 2>&1
-    ) &
+    (docker compose down >/dev/null 2>&1; docker compose up -d >/dev/null 2>&1) &
     show_spinner "Перезапуск бота"
-    echo
-    echo -e "${GREEN}✅ Бот перезапущен${NC}"
-    echo
-    echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-    read -p ""
+    echo -e "\n${GREEN}✅ Бот перезапущен${NC}\n"
+    echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
 }
 
 manage_stop() {
     cd "$PROJECT_DIR" || return
-    (
-        docker compose down >/dev/null 2>&1
-    ) &
+    (docker compose down >/dev/null 2>&1) &
     show_spinner "Остановка бота"
-    echo
-    echo -e "${GREEN}✅ Бот остановлен${NC}"
-    echo
-    echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-    read -p ""
+    echo -e "\n${GREEN}✅ Бот остановлен${NC}\n"
+    echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
 }
 
 manage_start() {
     cd "$PROJECT_DIR" || return
-    (
-        docker compose up -d >/dev/null 2>&1
-    ) &
+    (docker compose up -d >/dev/null 2>&1) &
     show_spinner "Запуск бота"
-    echo
-    echo -e "${GREEN}✅ Бот запущен${NC}"
-    echo
-    echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-    read -p ""
+    echo -e "\n${GREEN}✅ Бот запущен${NC}\n"
+    echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
 }
 
 manage_logs() {
     cd "$PROJECT_DIR" || return
+    clear
     echo -e "${BLUE}══════════════════════════════════════${NC}"
-    echo -e "${WHITE}  📋 ЛОГИ БОТА (последние 50 строк)${NC}"
+    echo -e "${GREEN}   📋 ЛОГИ БОТА (последние 50 строк)${NC}"
     echo -e "${BLUE}══════════════════════════════════════${NC}"
     echo
     docker compose logs --tail 50 dfc-mail 2>&1
     echo
-    echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-    read -p ""
+    echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
 }
 
 manage_logs_follow() {
@@ -310,8 +345,7 @@ manage_edit_env() {
         vi "$ENV_FILE"
     else
         echo -e "${RED}Редактор не найден. Установите nano: apt install nano${NC}"
-        echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-        read -p ""
+        echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
     fi
 }
 
@@ -320,32 +354,25 @@ manage_update() {
     local TEMP_REPO
     TEMP_REPO=$(mktemp -d)
 
-    (
-        git clone -b "$REPO_BRANCH" --depth 1 "$REPO_URL" "$TEMP_REPO" >/dev/null 2>&1
-    ) &
+    (git clone -b "$REPO_BRANCH" --depth 1 "$REPO_URL" "$TEMP_REPO" >/dev/null 2>&1) &
     show_spinner "Загрузка обновлений"
 
     if [ ! -f "$TEMP_REPO/docker-compose.yml" ]; then
         print_error "Ошибка загрузки обновлений"
         rm -rf "$TEMP_REPO"
-        echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-        read -p ""
+        echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
         return
     fi
 
-    # Копируем конфигурационные файлы
     (
         cp -f "$TEMP_REPO/docker-compose.yml" "$PROJECT_DIR/"
         [ -f "$TEMP_REPO/version" ] && cp -f "$TEMP_REPO/version" "$PROJECT_DIR/version"
-
-        # Обновляем install.sh в системной папке
         sudo mkdir -p "$SYSTEM_INSTALL_DIR" 2>/dev/null || true
         sudo cp -f "$TEMP_REPO/install.sh" "$SYSTEM_INSTALL_DIR/install.sh" 2>/dev/null || true
         sudo chmod +x "$SYSTEM_INSTALL_DIR/install.sh" 2>/dev/null || true
     ) &
     show_spinner "Копирование файлов"
 
-    # Пересборка образа
     (
         cd "$TEMP_REPO" || return
         docker build --no-cache -t dfc-mail:local \
@@ -357,12 +384,7 @@ manage_update() {
     ) &
     show_spinner "Сборка Docker образа"
 
-    # Перезапуск
-    (
-        cd "$PROJECT_DIR" || return
-        docker compose down >/dev/null 2>&1
-        docker compose up -d >/dev/null 2>&1
-    ) &
+    (cd "$PROJECT_DIR" || return; docker compose down >/dev/null 2>&1; docker compose up -d >/dev/null 2>&1) &
     show_spinner "Перезапуск бота"
 
     rm -rf "$TEMP_REPO"
@@ -371,64 +393,60 @@ manage_update() {
     show_spinner_until_log "dfc-mail" "Bot starting up" "Запуск бота" 90 && BOT_OK=0 || BOT_OK=$?
 
     if [ "${BOT_OK:-1}" -eq 0 ]; then
-        echo -e "${GREEN}✅ Обновление завершено успешно!${NC}"
+        echo -e "\n${GREEN}✅ Обновление завершено успешно!${NC}"
     else
-        echo -e "${YELLOW}⚠️  Бот не успел запуститься. Проверьте логи.${NC}"
+        echo -e "\n${YELLOW}⚠️  Бот не успел запуститься. Проверьте логи.${NC}"
     fi
-
     echo
-    echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-    read -p ""
+    echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
 }
 
 manage_reinstall() {
     echo
     echo -e "${YELLOW}⚠️  Переустановка удалит текущую конфигурацию и данные!${NC}"
-    echo -ne "${WHITE}Вы уверены? (y/N): ${NC}"
-    read -n 1 -r confirm
-    echo
+    echo -e "${DARKGRAY}Enter: Подтвердить     Esc: Отмена${NC}"
+    tput civis 2>/dev/null || true
+    local key
+    while true; do
+        read -s -n 1 key
+        if [[ "$key" == $'\x1b' ]]; then
+            tput cnorm 2>/dev/null || true
+            return
+        elif [[ "$key" == "" ]]; then
+            tput cnorm 2>/dev/null || true
+            break
+        fi
+    done
 
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        echo -e "${GRAY}Отмена${NC}"
-        echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-        read -p ""
-        return
-    fi
-
-    # Остановить и удалить
     if [ -d "$PROJECT_DIR" ]; then
-        (
-            cd "$PROJECT_DIR" && docker compose down -v >/dev/null 2>&1 || true
-        ) &
+        (cd "$PROJECT_DIR" && docker compose down -v >/dev/null 2>&1 || true) &
         show_spinner "Остановка контейнеров"
     fi
 
-    (
-        docker volume rm dfc-mail-db-data >/dev/null 2>&1 || true
-        rm -rf "$PROJECT_DIR"
-    ) &
+    (docker volume rm dfc-mail-db-data >/dev/null 2>&1 || true; rm -rf "$PROJECT_DIR") &
     show_spinner "Удаление данных"
 
-    echo -e "${GREEN}✅ Данные удалены. Запускаю установку...${NC}"
+    echo -e "\n${GREEN}✅ Данные удалены. Запускаю установку...${NC}"
     sleep 1
-
-    # Перезапускаем скрипт в режиме установки
     exec "$0" --install "$SCRIPT_CWD"
 }
 
 manage_uninstall() {
     echo
     echo -e "${RED}⚠️  ВНИМАНИЕ: Это действие удалит бота, базу данных и все настройки!${NC}"
-    echo -ne "${WHITE}Вы уверены? (y/N): ${NC}"
-    read -n 1 -r confirm
-    echo
-
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        echo -e "${GRAY}Отмена${NC}"
-        echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-        read -p ""
-        return
-    fi
+    echo -e "${DARKGRAY}Enter: Подтвердить     Esc: Отмена${NC}"
+    tput civis 2>/dev/null || true
+    local key
+    while true; do
+        read -s -n 1 key
+        if [[ "$key" == $'\x1b' ]]; then
+            tput cnorm 2>/dev/null || true
+            return
+        elif [[ "$key" == "" ]]; then
+            tput cnorm 2>/dev/null || true
+            break
+        fi
+    done
 
     (
         if [ -d "$PROJECT_DIR" ]; then
@@ -436,6 +454,7 @@ manage_uninstall() {
             cd /opt
         fi
         docker volume rm dfc-mail-db-data >/dev/null 2>&1 || true
+        docker network rm dfc-mail-network >/dev/null 2>&1 || true
         rm -rf "$PROJECT_DIR"
     ) &
     show_spinner "Удаление бота и данных"
@@ -444,23 +463,20 @@ manage_uninstall() {
         sudo rm -f /usr/local/bin/dfc-mail 2>/dev/null || true
         sudo rm -rf "$SYSTEM_INSTALL_DIR" 2>/dev/null || true
     ) &
-    show_spinner "Удаление ярлыка команды"
+    show_spinner "Удаление команды dfc-mail"
 
-    echo
-    echo -e "${GREEN}✅ Бот успешно удален!${NC}"
-    echo
-    echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-    read -p ""
+    echo -e "\n${GREEN}✅ Бот успешно удалён!${NC}\n"
+    echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
     clear
     exit 0
 }
 
 # ═══════════════════════════════════════════════
-# ГЛАВНОЕ МЕНЮ (если бот установлен)
+# ГЛАВНОЕ МЕНЮ (стиль dfc-remna-install)
 # ═══════════════════════════════════════════════
 show_full_menu() {
     while true; do
-        local ver="unknown"
+        local ver="$SCRIPT_VERSION"
         [ -f "$PROJECT_DIR/version" ] && ver=$(grep '^version:' "$PROJECT_DIR/version" | cut -d: -f2 | tr -d ' ')
 
         local status_text="${RED}остановлен${NC}"
@@ -468,32 +484,42 @@ show_full_menu() {
             status_text="${GREEN}работает${NC}"
         fi
 
-        local menu_title="📧 DFC MAIL BOT v${ver}  |  ${status_text}"
+        local menu_title="    📧 DFC MAIL BOT v${ver}  |  ${status_text}"
 
-        show_arrow_menu "$menu_title" \
-            "🔄 Перезапуск" \
-            "▶️  Запуск" \
-            "⏹  Остановка" \
-            "📋 Логи (последние 50)" \
-            "📋 Логи (в реальном времени)" \
-            "✏️  Редактировать .env" \
-            "🔄 Обновление" \
-            "🔁 Переустановка" \
-            "🗑  Удаление бота" \
-            "🚪 Выход"
+        local -a items=() actions=()
 
+        items+=("▶️   Запуск");             actions+=("start")
+        items+=("⏹️   Остановка");          actions+=("stop")
+        items+=("🔄  Перезапуск");          actions+=("restart")
+        items+=("──────────────────────────────────────"); actions+=("sep")
+        items+=("📋  Логи (последние 50)"); actions+=("logs")
+        items+=("📋  Логи (реальное время)"); actions+=("logs_follow")
+        items+=("──────────────────────────────────────"); actions+=("sep")
+        items+=("✏️   Редактировать .env");  actions+=("edit_env")
+        items+=("🔄  Обновление");          actions+=("update")
+        items+=("──────────────────────────────────────"); actions+=("sep")
+        items+=("🔁  Переустановка");       actions+=("reinstall")
+        items+=("🗑️   Удаление бота");       actions+=("uninstall")
+        items+=("──────────────────────────────────────"); actions+=("sep")
+        items+=("❌  Выход");               actions+=("exit")
+
+        show_arrow_menu "$menu_title" "${items[@]}"
         local choice=$?
-        case $choice in
-            0)  manage_restart ;;
-            1)  manage_start ;;
-            2)  manage_stop ;;
-            3)  manage_logs ;;
-            4)  manage_logs_follow ;;
-            5)  manage_edit_env ;;
-            6)  manage_update ;;
-            7)  manage_reinstall ;;
-            8)  manage_uninstall ;;
-            9)  clear; exit 0 ;;
+        local action="${actions[$choice]:-}"
+
+        case "$action" in
+            start)       manage_start ;;
+            stop)        manage_stop ;;
+            restart)     manage_restart ;;
+            logs)        manage_logs ;;
+            logs_follow) manage_logs_follow ;;
+            edit_env)    manage_edit_env ;;
+            update)      manage_update ;;
+            reinstall)   manage_reinstall ;;
+            uninstall)   manage_uninstall ;;
+            sep)         continue ;;
+            exit)        cleanup_terminal; exit 0 ;;
+            *)           continue ;;
         esac
     done
 }
@@ -503,8 +529,7 @@ show_full_menu() {
 # ═══════════════════════════════════════════════
 cleanup_on_error() {
     local exit_code=$?
-    tput cnorm >/dev/null 2>&1 || true
-    stty echo 2>/dev/null || true
+    cleanup_terminal
 
     if [ "$INSTALL_STARTED" = "true" ] && [ "$INSTALL_COMPLETED" != "true" ]; then
         clear
@@ -584,7 +609,6 @@ fi
 # УСТАНОВКА
 # ═══════════════════════════════════════════════
 
-# Автоправа
 chmod +x "$0" 2>/dev/null || true
 tput civis >/dev/null 2>&1 || true
 
@@ -632,8 +656,7 @@ show_spinner "Настройка системы"
 (
     mkdir -p "$PROJECT_DIR"/{logs,backups}
     chmod 755 "$PROJECT_DIR/logs" "$PROJECT_DIR/backups"
-
-    # Docker сеть создаётся автоматически через docker compose
+    # Сеть создаётся автоматически через docker compose
 ) &
 show_spinner "Подготовка целевой директории"
 
@@ -670,9 +693,7 @@ if [ ! -f "$ENV_FILE" ]; then
         sudo rm -rf "$SYSTEM_INSTALL_DIR" 2>/dev/null || true
         exit 1
     fi
-    (
-        cp "$SOURCE_DIR/.env.example" "$ENV_FILE"
-    ) &
+    (cp "$SOURCE_DIR/.env.example" "$ENV_FILE") &
     show_spinner "Инициализация конфигурации"
 else
     print_success "Конфигурация уже существует"
@@ -680,7 +701,7 @@ fi
 
 echo
 echo -e "${BLUE}══════════════════════════════════════${NC}"
-echo -e "${WHITE}    ⚙️  НАСТРОЙКА КОНФИГУРАЦИИ БОТА${NC}"
+echo -e "${GREEN}    ⚙️  НАСТРОЙКА КОНФИГУРАЦИИ БОТА${NC}"
 echo -e "${BLUE}══════════════════════════════════════${NC}"
 echo
 
@@ -734,10 +755,10 @@ fi
 # Платежные системы
 echo
 echo -e "${BLUE}══════════════════════════════════════${NC}"
-echo -e "${WHITE}    💳 ПЛАТЕЖНЫЕ СИСТЕМЫ (опционально)${NC}"
+echo -e "${GREEN}    💳 ПЛАТЕЖНЫЕ СИСТЕМЫ (опционально)${NC}"
 echo -e "${BLUE}══════════════════════════════════════${NC}"
 echo
-echo -e "${GRAY}Нажмите Enter чтобы пропустить${NC}"
+echo -e "${DARKGRAY}Нажмите Enter чтобы пропустить${NC}"
 echo
 
 reading_inline "YOOKASSA_SHOP_ID:" YOOKASSA_SHOP_ID
@@ -762,7 +783,6 @@ echo
 # АВТОГЕНЕРАЦИЯ СЕКРЕТОВ
 # ═══════════════════════════════════════════════
 (
-    # Пароль БД
     CURRENT_DB_PASS=$(grep "^DATABASE_PASSWORD=" "$ENV_FILE" | cut -d'=' -f2 | tr -d ' ')
     if [ -z "$CURRENT_DB_PASS" ]; then
         DATABASE_PASSWORD=$(generate_password)
@@ -771,7 +791,6 @@ echo
         DATABASE_PASSWORD="$CURRENT_DB_PASS"
     fi
 
-    # Синхронизация PostgreSQL
     update_env_var "$ENV_FILE" "POSTGRES_PASSWORD" "$DATABASE_PASSWORD"
     DATABASE_USER=$(grep "^DATABASE_USER=" "$ENV_FILE" | cut -d'=' -f2 | tr -d ' ')
     [ -n "$DATABASE_USER" ] && update_env_var "$ENV_FILE" "POSTGRES_USER" "$DATABASE_USER"
@@ -780,17 +799,11 @@ echo
 ) &
 show_spinner "Создание конфигурации"
 
-# ═══════════════════════════════════════════════
-# ПОДГОТОВКА ПАПОК
-# ═══════════════════════════════════════════════
-(
-    mkdir -p "$PROJECT_DIR"/{logs,backups}
-) &
+# Подготовка папок
+(mkdir -p "$PROJECT_DIR"/{logs,backups}) &
 show_spinner "Создание структуры папок"
 
-# ═══════════════════════════════════════════════
-# ОЧИСТКА СТАРЫХ ДАННЫХ
-# ═══════════════════════════════════════════════
+# Очистка старых данных
 (
     cd "$PROJECT_DIR"
     docker compose down >/dev/null 2>&1 || true
@@ -799,9 +812,7 @@ show_spinner "Создание структуры папок"
 ) &
 show_spinner "Очистка старых данных БД"
 
-# ═══════════════════════════════════════════════
-# СБОРКА DOCKER ОБРАЗА
-# ═══════════════════════════════════════════════
+# Сборка Docker образа
 (
     if [ "$COPY_FILES" = true ] && [ -d "$SOURCE_DIR" ]; then
         cd "$SOURCE_DIR"
@@ -815,9 +826,7 @@ show_spinner "Очистка старых данных БД"
 ) &
 show_spinner "Сборка Docker образа"
 
-# ═══════════════════════════════════════════════
-# ВЫБОР СВОБОДНОГО ПОРТА ДЛЯ WEBHOOK
-# ═══════════════════════════════════════════════
+# Выбор свободного порта
 _wp=$(grep "^WEBHOOK_PORT=" "$ENV_FILE" | cut -d'=' -f2 | tr -d ' ')
 _wp=${_wp:-8443}
 while ss -tlnp 2>/dev/null | grep -q ":${_wp}[[:space:]]"; do
@@ -825,18 +834,11 @@ while ss -tlnp 2>/dev/null | grep -q ":${_wp}[[:space:]]"; do
 done
 update_env_var "$ENV_FILE" "WEBHOOK_PORT" "$_wp"
 
-# ═══════════════════════════════════════════════
-# ЗАПУСК КОНТЕЙНЕРОВ
-# ═══════════════════════════════════════════════
-(
-    cd "$PROJECT_DIR"
-    docker compose up -d >/dev/null 2>&1
-) &
+# Запуск контейнеров
+(cd "$PROJECT_DIR"; docker compose up -d >/dev/null 2>&1) &
 show_spinner "Запуск сервисов"
 
-# ═══════════════════════════════════════════════
-# ОЖИДАНИЕ ЗАПУСКА
-# ═══════════════════════════════════════════════
+# Ожидание запуска
 echo
 show_spinner_until_log "dfc-mail" "Bot starting up" "Запуск бота" 90 && BOT_START_RESULT=0 || BOT_START_RESULT=$?
 echo
@@ -861,13 +863,15 @@ elif [ ${BOT_START_RESULT:-1} -eq 2 ]; then
     echo
     echo -e "${RED}Бот установлен, но при запуске произошла ошибка.${NC}"
     echo
-    echo -ne "${YELLOW}Показать логи? [Y/n]: ${NC}"
-    read -n 1 -r show_logs_choice
-    echo
-    if [[ -z "$show_logs_choice" || "$show_logs_choice" =~ ^[Yy]$ ]]; then
+    echo -e "${DARKGRAY}Enter: Показать логи     Esc: Пропустить${NC}"
+    tput civis 2>/dev/null || true
+    local key 2>/dev/null || true
+    read -s -n 1 key
+    if [[ "$key" != $'\x1b' ]]; then
         echo
         docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 dfc-mail
     fi
+    tput cnorm 2>/dev/null || true
 else
     echo
     echo -e "${BLUE}══════════════════════════════════════${NC}"
@@ -876,13 +880,14 @@ else
     echo
     echo -e "${YELLOW}Бот установлен, но не запустился за 90 сек.${NC}"
     echo
-    echo -ne "${YELLOW}Показать логи? [Y/n]: ${NC}"
-    read -n 1 -r show_logs_choice
-    echo
-    if [[ -z "$show_logs_choice" || "$show_logs_choice" =~ ^[Yy]$ ]]; then
+    echo -e "${DARKGRAY}Enter: Показать логи     Esc: Пропустить${NC}"
+    tput civis 2>/dev/null || true
+    read -s -n 1 key
+    if [[ "${key:-}" != $'\x1b' ]]; then
         echo
         docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 dfc-mail
     fi
+    tput cnorm 2>/dev/null || true
 fi
 echo
 
@@ -917,8 +922,7 @@ if [ "$COPY_FILES" = true ] && [ "$SOURCE_DIR" != "$PROJECT_DIR" ] && [ "$SOURCE
     rm -rf "$SOURCE_DIR" 2>/dev/null || true
 fi
 
-echo -e "${DARKGRAY}Нажмите Enter для продолжения${NC}"
-read -p ""
+echo -e "${DARKGRAY}Enter: Продолжить${NC}"; read -rsn1
 clear
 
 cd /opt

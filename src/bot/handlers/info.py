@@ -88,31 +88,13 @@ async def show_support(message: Message, session: AsyncSession, state: FSMContex
     )
 
 
-@router.message(F.chat.type.in_(["group", "supergroup"]))
+@router.message(F.chat.type.in_(["group", "supergroup"]), ~F.text.startswith("/"))
 async def handle_group_message(message: Message, session: AsyncSession):
-    """Обработка сообщений в группе для автоматической настройки чата поддержки и ответов пользователям"""
-    # Если это reply на сообщение - пересылаем пользователю
+    """Обработка сообщений в группе для ответов пользователям (reply → пересылка)."""
+    # Только reply на сообщение → пересылаем пользователю
     if message.reply_to_message:
         await handle_support_reply(message, session)
         return
-    
-    # Если сообщение отправлено администратором, сохраняем ID чата
-    if message.from_user and message.from_user.id in settings.admin_ids_list:
-        chat_id = message.chat.id
-        
-        # Проверяем, не установлен ли уже чат поддержки
-        stmt = select(Setting).where(Setting.key == "support_chat_id")
-        result = await session.execute(stmt)
-        setting = result.scalar_one_or_none()
-        
-        if not setting:
-            setting = Setting(key="support_chat_id", value=str(chat_id))
-            session.add(setting)
-        elif setting.value != str(chat_id):
-            setting.value = str(chat_id)
-        
-        await session.commit()
-        logger.info(f"Support chat ID saved: {chat_id}")
 
 
 async def handle_support_reply(message: Message, session: AsyncSession):
