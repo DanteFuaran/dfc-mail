@@ -1,0 +1,77 @@
+services:
+  dfc-mail-db:
+    image: postgres:17
+    container_name: "dfc-mail-db"
+    hostname: dfc-mail-db
+    restart: unless-stopped
+
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${DATABASE_USER}
+      - POSTGRES_PASSWORD=${DATABASE_PASSWORD}
+      - POSTGRES_DB=${DATABASE_NAME}
+      - TZ=UTC
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    volumes:
+      - dfc-mail-db-data:/var/lib/postgresql/data
+
+    networks:
+      - dfc-mail-network
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+
+  dfc-mail:
+    image: dfc-mail:local
+    container_name: "dfc-mail"
+    hostname: dfc-mail
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /opt/dfc-mail
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    depends_on:
+      dfc-mail-db:
+        condition: service_healthy
+
+    ports:
+      - '127.0.0.1:${WEBHOOK_PORT:-8443}:${WEBHOOK_PORT:-8443}'
+
+    volumes:
+      - ./logs:/opt/dfc-mail/logs
+      - ./backups:/opt/dfc-mail/backups
+
+    networks:
+      - dfc-mail-network
+
+
+networks:
+  dfc-mail-network:
+    name: dfc-mail-network
+    driver: bridge
+
+volumes:
+  dfc-mail-db-data:
+    name: dfc-mail-db-data
+    driver: local
