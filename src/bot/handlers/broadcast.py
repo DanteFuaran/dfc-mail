@@ -1,248 +1,209 @@
-"""Обработчик рассылки"""
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from src.database.models import User
-from src.config import settings
+"""Рассылка (массовая и индивидуальная) — inline-only single-message UI"""
 import asyncio
 import logging
 
-logger = logging.getLogger(__name__)
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.bot.keyboards import admin_broadcast_kb, cancel_input_kb, noop_kb
+from src.bot.states import BroadcastStates
+from src.bot.utils import answer_callback, safe_edit
+from src.config import settings
+from src.database.models import User
+
+logger = logging.getLogger(__name__)
 router = Router()
 
 
-def get_all_menu_buttons():
-    """Получить все кнопки меню"""
-    from src.bot.texts import MENU_CATALOG, MENU_BALANCE, MENU_ORDERS, MENU_REFERRAL, MENU_SUPPORT, MENU_INFO, MENU_RULES, MENU_ADMIN, MENU_BROADCAST
-    return [MENU_CATALOG, MENU_BALANCE, MENU_ORDERS, MENU_REFERRAL, MENU_SUPPORT, MENU_INFO, MENU_RULES, MENU_ADMIN, MENU_BROADCAST, "📢 Рассылка", "⚙️ Пункт управления"]
+def _is_admin(user_id: int) -> bool:
+    return user_id in settings.admin_ids_list or user_id in settings.developer_ids_list
 
 
-async def check_menu_button_and_clear_state(message: Message, state: FSMContext) -> bool:
-    """Проверить, является ли сообщение кнопкой меню, и очистить состояние если да"""
-    if message.text:
-        menu_buttons = get_all_menu_buttons()
-        if message.text in menu_buttons or message.text.startswith('/'):
-            await state.clear()
-            return True
-    return False
+# ═══════════════════════════════════════════════
+# Меню рассылки
+# ═══════════════════════════════════════════════
 
-
-class BroadcastStates(StatesGroup):
-    """Состояния для рассылки"""
-    waiting_message = State()
-    waiting_user_id = State()
-
-
-def is_admin(user_id: int) -> bool:
-    """Проверка, является ли пользователь администратором"""
-    return user_id in settings.admin_ids_list
-
-
-@router.message(F.text == "📢 Рассылка")
-async def broadcast_menu(message: Message, state: FSMContext):
-    """Меню рассылки"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
+@router.callback_query(F.data == "adm:broadcast")
+async def broadcast_menu(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await answer_callback(callback, "⛔ Нет доступа.")
         return
-    
-    # Очищаем предыдущее состояние, если оно было
     await state.clear()
-    
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Массовая рассылка", callback_data="broadcast_mass")],
-        [InlineKeyboardButton(text="👤 Индивидуальная рассылка", callback_data="broadcast_individual")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-    ])
-    
-    await message.answer(
-        "📢 <b>Рассылка</b>\n\n"
-        "Выберите тип рассылки:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
+    await safe_edit(
+        callback,
+        "📢 <b>Рассылка</b>\n\nВыберите тип рассылки:",
+        admin_broadcast_kb(),
     )
+    await answer_callback(callback)
 
 
-@router.callback_query(F.data == "broadcast_mass")
-async def broadcast_mass_start(callback: CallbackQuery, state: FSMContext):
-    """Начать массовую рассылку"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Доступ запрещен", show_alert=True)
+# ═══════════════════════════════════════════════
+# Массовая рассылка
+# ═══════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:bcast:mass")
+async def mass_broadcast_start(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await answer_callback(callback, "⛔ Нет доступа.")
         return
-    
-    await state.update_data(broadcast_type="mass")
+    await state.update_data(_menu_msg_id=callback.message.message_id)
     await state.set_state(BroadcastStates.waiting_message)
-    
-    from src.bot.keyboards import get_back_keyboard
-    await callback.message.edit_text(
-        "📢 <b>Массовая рассылка</b>\n\n"
-        "Отправьте сообщение для рассылки всем пользователям:",
-        reply_markup=get_back_keyboard("admin_menu"),
-        parse_mode="HTML"
+    await safe_edit(
+        callback,
+        "📢 <b>Массовая рассылка</b>\n\nВведите текст сообщения для всех пользователей:",
+        cancel_input_kb("adm:broadcast"),
     )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "broadcast_individual")
-async def broadcast_individual_start(callback: CallbackQuery, state: FSMContext):
-    """Начать индивидуальную рассылку"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Доступ запрещен", show_alert=True)
-        return
-    
-    await state.update_data(broadcast_type="individual")
-    await state.set_state(BroadcastStates.waiting_user_id)
-    
-    await callback.message.edit_text(
-        "👤 <b>Индивидуальная рассылка</b>\n\n"
-        "Введите ID пользователя:",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-
-@router.message(BroadcastStates.waiting_user_id)
-async def process_user_id(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка ID пользователя для индивидуальной рассылки"""
-    # Проверяем, не выбрана ли кнопка меню
-    if await check_menu_button_and_clear_state(message, state):
-        return
-    
-    try:
-        user_id = int(message.text)
-        await state.update_data(target_user_id=user_id)
-        await message.answer(
-            "👤 <b>Индивидуальная рассылка</b>\n\n"
-            "Отправьте сообщение для пользователя:"
-        )
-        await state.set_state(BroadcastStates.waiting_message)
-    except ValueError:
-        await message.answer("Введите корректный ID пользователя (число):")
-
-
-async def send_broadcast_message(
-    bot,
-    user_id: int,
-    message_text: str,
-    message_photo: str = None,
-    message_document: str = None
-):
-    """Отправить сообщение пользователю"""
-    try:
-        if message_photo:
-            await bot.send_photo(user_id, message_photo, caption=message_text)
-        elif message_document:
-            await bot.send_document(user_id, message_document, caption=message_text)
-        else:
-            await bot.send_message(user_id, message_text)
-        return True
-    except Exception as e:
-        logger.error(f"Error sending message to user {user_id}: {e}")
-        return False
+    await answer_callback(callback)
 
 
 @router.message(BroadcastStates.waiting_message)
-async def process_broadcast_message(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка сообщения для рассылки"""
-    # Проверяем, не выбрана ли кнопка меню
-    if await check_menu_button_and_clear_state(message, state):
-        return
-    
-    data = await state.get_data()
-    broadcast_type = data.get("broadcast_type")
-    
-    if not broadcast_type:
-        await message.answer("Ошибка. Начните заново.")
+async def mass_broadcast_process(message: Message, state: FSMContext, session: AsyncSession):
+    if not _is_admin(message.from_user.id):
         await state.clear()
         return
-    
-    if broadcast_type == "mass":
-        # Массовая рассылка
-        await message.answer("📢 Начинаю массовую рассылку...")
-        
-        stmt = select(User).where(User.is_blocked == False)
-        result = await session.execute(stmt)
-        users = result.scalars().all()
-        
-        total = len(users)
-        success = 0
-        failed = 0
-        
-        # Throttling: не более 25 сообщений в секунду
-        throttle_delay = 1.0 / settings.BROADCAST_THROTTLE
-        
-        for user in users:
-            try:
-                # Определяем тип сообщения
-                if message.photo:
-                    await send_broadcast_message(
-                        message.bot,
-                        user.telegram_id,
-                        message.caption or "",
-                        message_photo=message.photo[-1].file_id
-                    )
-                elif message.document:
-                    await send_broadcast_message(
-                        message.bot,
-                        user.telegram_id,
-                        message.caption or "",
-                        message_document=message.document.file_id
-                    )
-                else:
-                    await send_broadcast_message(
-                        message.bot,
-                        user.telegram_id,
-                        message.text
-                    )
-                success += 1
-            except Exception as e:
-                logger.error(f"Error sending to user {user.telegram_id}: {e}")
-                failed += 1
-            
-            # Throttling
-            await asyncio.sleep(throttle_delay)
-        
-        await message.answer(
-            f"✅ Рассылка завершена!\n"
-            f"Всего: {total}\n"
-            f"Успешно: {success}\n"
-            f"Ошибок: {failed}"
-        )
-        
-    elif broadcast_type == "individual":
-        # Индивидуальная рассылка
-        target_user_id = data.get("target_user_id")
-        
-        try:
-            if message.photo:
-                await send_broadcast_message(
-                    message.bot,
-                    target_user_id,
-                    message.caption or "",
-                    message_photo=message.photo[-1].file_id
-                )
-            elif message.document:
-                await send_broadcast_message(
-                    message.bot,
-                    target_user_id,
-                    message.caption or "",
-                    message_document=message.document.file_id
-                )
-            else:
-                await send_broadcast_message(
-                    message.bot,
-                    target_user_id,
-                    message.text
-                )
-            
-            await message.answer(f"✅ Сообщение отправлено пользователю {target_user_id}")
-        except Exception as e:
-            logger.error(f"Error sending to user {target_user_id}: {e}")
-            await message.answer(f"❌ Ошибка при отправке: {e}")
-    
+
+    data = await state.get_data()
+    msg_id = data.get("_menu_msg_id")
     await state.clear()
 
+    text = (message.text or "").strip()
+    if not text:
+        try:
+            await message.bot.edit_message_text(
+                "❌ Пустое сообщение.",
+                chat_id=message.chat.id, message_id=msg_id,
+                reply_markup=cancel_input_kb("adm:broadcast"), parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    # Отправляем статус
+    try:
+        await message.bot.edit_message_text(
+            "📤 Отправка...",
+            chat_id=message.chat.id, message_id=msg_id,
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    stmt = select(User).where(User.is_blocked == False)
+    result = await session.execute(stmt)
+    users = result.scalars().all()
+
+    sent, failed = 0, 0
+    throttle = settings.BROADCAST_THROTTLE or 25
+
+    for i, user in enumerate(users):
+        try:
+            await message.bot.send_message(user.telegram_id, text, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+        if (i + 1) % throttle == 0:
+            await asyncio.sleep(1)
+
+    result_text = (
+        f"📢 <b>Рассылка завершена</b>\n\n"
+        f"✅ Отправлено: {sent}\n"
+        f"❌ Ошибки: {failed}\n"
+        f"📊 Всего: {len(users)}"
+    )
+    try:
+        await message.bot.edit_message_text(
+            result_text,
+            chat_id=message.chat.id, message_id=msg_id,
+            reply_markup=noop_kb(), parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════
+# Индивидуальная рассылка
+# ═══════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:bcast:individual")
+async def individual_broadcast_start(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await answer_callback(callback, "⛔ Нет доступа.")
+        return
+    await state.update_data(_menu_msg_id=callback.message.message_id)
+    await state.set_state(BroadcastStates.waiting_user_id)
+    await safe_edit(
+        callback,
+        "👤 <b>Индивидуальная рассылка</b>\n\nВведите Telegram ID пользователя:",
+        cancel_input_kb("adm:broadcast"),
+    )
+    await answer_callback(callback)
+
+
+@router.message(BroadcastStates.waiting_user_id)
+async def individual_broadcast_user_id(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    msg_id = data.get("_menu_msg_id")
+
+    try:
+        target_id = int(message.text.strip())
+    except (ValueError, TypeError, AttributeError):
+        try:
+            await message.bot.edit_message_text(
+                "❌ Введите числовой Telegram ID:",
+                chat_id=message.chat.id, message_id=msg_id,
+                reply_markup=cancel_input_kb("adm:broadcast"), parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    await state.update_data(_target_user_id=target_id)
+    await state.set_state(BroadcastStates.waiting_individual_message)
+
+    try:
+        await message.bot.edit_message_text(
+            f"📝 Введите сообщение для пользователя <code>{target_id}</code>:",
+            chat_id=message.chat.id, message_id=msg_id,
+            reply_markup=cancel_input_kb("adm:broadcast"), parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+@router.message(BroadcastStates.waiting_individual_message)
+async def individual_broadcast_send(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    msg_id = data.get("_menu_msg_id")
+    target_id = data.get("_target_user_id")
+    await state.clear()
+
+    text = (message.text or "").strip()
+    if not text or not target_id:
+        return
+
+    try:
+        await message.bot.send_message(target_id, text, parse_mode="HTML")
+        result = f"✅ Сообщение отправлено пользователю <code>{target_id}</code>."
+    except Exception as e:
+        logger.error("Individual broadcast error to %s: %s", target_id, e)
+        result = f"❌ Не удалось отправить сообщение пользователю <code>{target_id}</code>."
+
+    try:
+        await message.bot.edit_message_text(
+            result,
+            chat_id=message.chat.id, message_id=msg_id,
+            reply_markup=noop_kb(), parse_mode="HTML",
+        )
+    except Exception:
+        pass

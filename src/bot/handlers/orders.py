@@ -1,313 +1,142 @@
-"""Обработчик заказов"""
-from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
-from aiogram.fsm.context import FSMContext
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from src.database.models import Order, User, Product
-from src.services.account_service import get_accounts_for_order, create_accounts_file
-from src.bot.keyboards import get_orders_keyboard, get_order_detail_keyboard
-from src.bot.texts import MENU_ORDERS
-from aiogram.types import BufferedInputFile
+"""Заказы — inline-only single-message UI"""
 import logging
 
-logger = logging.getLogger(__name__)
+from aiogram import F, Router
+from aiogram.types import CallbackQuery
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.bot.keyboards import order_detail_kb, orders_kb, payment_methods_kb
+from src.bot.texts import order_text
+from src.bot.utils import answer_callback, safe_edit
+from src.database.models import Account, Order, Product, User
+from src.services.account_service import create_accounts_file, get_accounts_for_order
+
+logger = logging.getLogger(__name__)
 router = Router()
 
 
-@router.message(F.text == MENU_ORDERS)
-async def show_orders(message: Message, session: AsyncSession, state: FSMContext):
-    """Показать заказы пользователя"""
-    # Очищаем FSM состояние при переходе в заказы
-    await state.clear()
-    
-    user_id = message.from_user.id
-    
-    stmt_user = select(User).where(User.telegram_id == user_id)
-    result_user = await session.execute(stmt_user)
-    user = result_user.scalar_one_or_none()
-    
+@router.callback_query(F.data == "menu:orders")
+async def show_orders(callback: CallbackQuery, session: AsyncSession):
+    stmt_u = select(User).where(User.telegram_id == callback.from_user.id)
+    user = (await session.execute(stmt_u)).scalar_one_or_none()
     if not user:
-        await message.answer("Пользователь не найден. Используйте /start")
+        await answer_callback(callback, "Пользователь не найден")
         return
-    
-    stmt = select(Order).where(Order.user_id == user.id).order_by(Order.created_at.desc())
+
+    stmt = select(Order).where(Order.user_id == user.id).order_by(Order.created_at.desc()).limit(20)
     result = await session.execute(stmt)
-    orders = result.scalars().all()
-    
-    if not orders:
-        await message.answer("У вас пока нет заказов")
-        return
-    
-    await message.answer(
-        "📦 Ваши заказы:",
-        reply_markup=get_orders_keyboard(orders)
-    )
+    user_orders = result.scalars().all()
+
+    if not user_orders:
+        await safe_edit(callback, "📦 <b>Мои заказы</b>\n\nУ вас пока нет заказов.", orders_kb([]))
+    else:
+        await safe_edit(callback, "📦 <b>Мои заказы</b>\n\nВыберите заказ:", orders_kb(user_orders))
+    await answer_callback(callback)
 
 
-@router.callback_query(F.data == "my_orders")
-async def show_orders_callback(callback: CallbackQuery, session: AsyncSession):
-    """Показать заказы (callback)"""
-    user_id = callback.from_user.id
-    
-    stmt_user = select(User).where(User.telegram_id == user_id)
-    result_user = await session.execute(stmt_user)
-    user = result_user.scalar_one_or_none()
-    
-    if not user:
-        await callback.answer("Пользователь не найден", show_alert=True)
-        return
-    
-    stmt = select(Order).where(Order.user_id == user.id).order_by(Order.created_at.desc())
-    result = await session.execute(stmt)
-    orders = result.scalars().all()
-    
-    if not orders:
-        await callback.message.edit_text("У вас пока нет заказов")
-        await callback.answer()
-        return
-    
-    await callback.message.edit_text(
-        "📦 Ваши заказы:",
-        reply_markup=get_orders_keyboard(orders)
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("order_"))
+@router.callback_query(F.data.startswith("order:"))
 async def show_order_detail(callback: CallbackQuery, session: AsyncSession):
-    """Показать детали заказа"""
-    order_id = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
-    
-    stmt_user = select(User).where(User.telegram_id == user_id)
-    result_user = await session.execute(stmt_user)
-    user = result_user.scalar_one_or_none()
-    
-    if not user:
-        await callback.answer("Пользователь не найден", show_alert=True)
-        return
-    
-    stmt = select(Order).where(Order.id == order_id, Order.user_id == user.id)
-    result = await session.execute(stmt)
-    order = result.scalar_one_or_none()
-    
+    order_id = int(callback.data.split(":")[1])
+    stmt = select(Order).where(Order.id == order_id)
+    order = (await session.execute(stmt)).scalar_one_or_none()
     if not order:
-        await callback.answer("Заказ не найден", show_alert=True)
+        await answer_callback(callback, "Заказ не найден")
         return
-    
-    # Получаем товар
-    stmt_product = select(Product).where(Product.id == order.product_id)
-    result_product = await session.execute(stmt_product)
-    product = result_product.scalar_one_or_none()
-    
-    status_emoji = {
-        "ОЖИДАЕТ ОПЛАТЫ": "⏳",
-        "ОПЛАЧЕНО": "✅",
-        "ВЫПОЛНЕНО": "✔️",
-        "ОТМЕНЕНО": "❌"
-    }.get(order.status, "❓")
-    
-    text = f"""📦 <b>Заказ #{order.id}</b>
 
-{status_emoji} Статус: {order.status}
-📦 Товар: {product.name if product else 'Неизвестно'}
-📊 Количество: {order.quantity} шт.
-💰 Цена за единицу: {order.price_per_unit:.2f} ₽
-"""
-    
-    if order.discount > 0:
-        text += f"🎁 Скидка: {order.discount}%\n"
-    
-    text += f"💰 Итого: {order.total_amount:.2f} ₽\n"
-    
-    if order.payment_method:
-        text += f"💳 Способ оплаты: {order.payment_method}\n"
-    
-    text += f"📅 Дата создания: {order.created_at.strftime('%d.%m.%Y %H:%M')}\n"
-    
-    if order.paid_at:
-        text += f"✅ Оплачен: {order.paid_at.strftime('%d.%m.%Y %H:%M')}\n"
-    
-    if order.completed_at:
-        text += f"✔️ Выполнен: {order.completed_at.strftime('%d.%m.%Y %H:%M')}\n"
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_order_detail_keyboard(order_id, order.status),
-        parse_mode="HTML"
-    )
-    await callback.answer()
+    # Добавляем название товара
+    stmt_p = select(Product).where(Product.id == order.product_id)
+    product = (await session.execute(stmt_p)).scalar_one_or_none()
+    prod_name = product.name if product else "—"
+
+    text = order_text(order) + f"\n🏷️ Товар: {prod_name}"
+    await safe_edit(callback, text, order_detail_kb(order_id, order.status))
+    await answer_callback(callback)
 
 
-@router.callback_query(F.data.startswith("pay_order_"))
+@router.callback_query(F.data.startswith("pay_order:"))
 async def pay_order(callback: CallbackQuery, session: AsyncSession):
-    """Оплатить неоплаченный заказ"""
-    order_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-    
-    stmt_user = select(User).where(User.telegram_id == user_id)
-    result_user = await session.execute(stmt_user)
-    user = result_user.scalar_one_or_none()
-    
-    if not user:
-        await callback.answer("Пользователь не найден", show_alert=True)
+    order_id = int(callback.data.split(":")[1])
+    stmt = select(Order).where(Order.id == order_id)
+    order = (await session.execute(stmt)).scalar_one_or_none()
+    if not order or order.status != "ОЖИДАЕТ ОПЛАТЫ":
+        await answer_callback(callback, "Заказ недоступен для оплаты")
         return
-    
-    stmt = select(Order).where(Order.id == order_id, Order.user_id == user.id)
-    result = await session.execute(stmt)
-    order = result.scalar_one_or_none()
-    
-    if not order:
-        await callback.answer("Заказ не найден", show_alert=True)
-        return
-    
-    if order.status != "ОЖИДАЕТ ОПЛАТЫ":
-        await callback.answer("Заказ уже оплачен или отменен", show_alert=True)
-        return
-    
-    # Получаем товар
-    stmt_product = select(Product).where(Product.id == order.product_id)
-    result_product = await session.execute(stmt_product)
-    product = result_product.scalar_one_or_none()
-    
-    # Показываем способы оплаты
-    from src.bot.keyboards import get_payment_methods_keyboard
-    
-    text = f"""📦 <b>Заказ #{order.id}</b>
 
-Товар: {product.name if product else 'Неизвестно'}
-Количество: {order.quantity} шт.
-💰 Итого: {order.total_amount:.2f} ₽
+    stmt_p = select(Product).where(Product.id == order.product_id)
+    product = (await session.execute(stmt_p)).scalar_one_or_none()
+    prod_name = product.name if product else "—"
 
-Выберите способ оплаты:"""
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_payment_methods_keyboard(order.id),
-        parse_mode="HTML"
+    text = (
+        f"📦 <b>Заказ #{order.id}</b>\n\n"
+        f"Товар: {prod_name}\n"
+        f"Количество: {order.quantity} шт.\n"
+        f"💰 <b>Итого: {order.total_amount:.2f} ₽</b>\n\n"
+        f"Выберите способ оплаты:"
     )
-    await callback.answer()
+    await safe_edit(callback, text, payment_methods_kb(order_id))
+    await answer_callback(callback)
 
 
-@router.callback_query(F.data.startswith("cancel_order_"))
-async def cancel_order_from_detail(callback: CallbackQuery, session: AsyncSession):
-    """Отменить заказ из деталей"""
-    order_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-    
-    stmt_user = select(User).where(User.telegram_id == user_id)
-    result_user = await session.execute(stmt_user)
-    user = result_user.scalar_one_or_none()
-    
-    if not user:
-        await callback.answer("Пользователь не найден", show_alert=True)
-        return
-    
-    stmt = select(Order).where(Order.id == order_id, Order.user_id == user.id)
-    result = await session.execute(stmt)
-    order = result.scalar_one_or_none()
-    
+@router.callback_query(F.data.startswith("cancel:"))
+async def cancel_order(callback: CallbackQuery, session: AsyncSession):
+    order_id = int(callback.data.split(":")[1])
+    stmt = select(Order).where(Order.id == order_id)
+    order = (await session.execute(stmt)).scalar_one_or_none()
     if not order:
-        await callback.answer("Заказ не найден", show_alert=True)
+        await answer_callback(callback, "Заказ не найден")
         return
-    
     if order.status != "ОЖИДАЕТ ОПЛАТЫ":
-        await callback.answer("Можно отменить только неоплаченные заказы", show_alert=True)
+        await answer_callback(callback, "Этот заказ нельзя отменить")
         return
-    
-    # Освобождаем зарезервированные аккаунты
-    from src.database.models import Account
-    from sqlalchemy import update
-    from datetime import datetime
-    
-    # Получаем аккаунты заказа
-    stmt_accounts = select(Account).where(Account.order_id == order_id)
-    result_accounts = await session.execute(stmt_accounts)
-    accounts = result_accounts.scalars().all()
-    
+
+    # Возврат аккаунтов
+    stmt_acc = select(Account).where(Account.order_id == order.id)
+    accounts = (await session.execute(stmt_acc)).scalars().all()
     if accounts:
-        account_ids = [acc.id for acc in accounts]
-        # Освобождаем аккаунты
+        acc_ids = [a.id for a in accounts]
         await session.execute(
-            update(Account)
-            .where(Account.id.in_(account_ids))
-            .values(
-                is_sold=False,
-                sold_at=None,
-                order_id=None
+            update(Account).where(Account.id.in_(acc_ids)).values(is_sold=False, sold_at=None, order_id=None)
+        )
+        await session.execute(
+            update(Product).where(Product.id == order.product_id).values(
+                stock_count=Product.stock_count + order.quantity
             )
         )
-        
-        # Возвращаем товар на склад
-        await session.execute(
-            update(Product)
-            .where(Product.id == order.product_id)
-            .values(stock_count=Product.stock_count + order.quantity)
-        )
-    
-    # Отменяем заказ
+
     order.status = "ОТМЕНЕНО"
     order.reserved_until = None
     await session.commit()
-    
-    from src.bot.keyboards import get_back_keyboard
-    await callback.message.edit_text(
-        "❌ Заказ отменен\n\n"
-        "✅ Товар возвращен в каталог",
-        reply_markup=get_back_keyboard("my_orders")
+
+    from src.bot.keyboards import noop_kb
+    await safe_edit(
+        callback,
+        f"❌ <b>Заказ #{order_id} отменён</b>\n\nТовар возвращён в каталог.",
+        noop_kb(),
     )
-    await callback.answer("Заказ отменен, товар возвращен на склад")
+    await answer_callback(callback)
 
 
-@router.callback_query(F.data.startswith("download_"))
+@router.callback_query(F.data.startswith("download:"))
 async def download_order(callback: CallbackQuery, session: AsyncSession):
-    """Скачать товар из заказа"""
-    order_id = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
-    
-    stmt_user = select(User).where(User.telegram_id == user_id)
-    result_user = await session.execute(stmt_user)
-    user = result_user.scalar_one_or_none()
-    
-    if not user:
-        await callback.answer("Пользователь не найден", show_alert=True)
+    order_id = int(callback.data.split(":")[1])
+    stmt = select(Order).where(Order.id == order_id)
+    order = (await session.execute(stmt)).scalar_one_or_none()
+    if not order or order.status != "ВЫПОЛНЕНО":
+        await answer_callback(callback, "Заказ не доступен для скачивания")
         return
-    
-    stmt = select(Order).where(Order.id == order_id, Order.user_id == user.id)
-    result = await session.execute(stmt)
-    order = result.scalar_one_or_none()
-    
-    if not order:
-        await callback.answer("Заказ не найден", show_alert=True)
-        return
-    
-    if order.status != "ВЫПОЛНЕНО":
-        await callback.answer("Заказ еще не выполнен", show_alert=True)
-        return
-    
-    try:
-        # Получаем аккаунты
-        accounts = await get_accounts_for_order(session, order_id)
-        
-        if not accounts:
-            await callback.answer("Товар не найден", show_alert=True)
-            return
-        
-        # Создаем файл
-        file_obj = await create_accounts_file(accounts)
-        
-        await callback.message.answer_document(
-            BufferedInputFile(
-                file_obj.read(),
-                filename=file_obj.name
-            ),
-            caption=f"📦 Товар по заказу #{order_id}"
-        )
-        await callback.answer("✅ Файл отправлен")
-        
-    except Exception as e:
-        logger.error(f"Error downloading order {order_id}: {e}")
-        await callback.answer("Ошибка при загрузке товара", show_alert=True)
 
+    accounts = await get_accounts_for_order(session, order_id)
+    if not accounts:
+        await answer_callback(callback, "Нет данных для скачивания")
+        return
+
+    from aiogram.types import BufferedInputFile
+
+    file_obj = await create_accounts_file(accounts)
+    file_bytes = file_obj.read()
+    file_obj.seek(0)
+
+    doc = BufferedInputFile(file_bytes, filename=file_obj.name)
+    await callback.message.answer_document(doc, caption=f"📥 Данные к заказу #{order_id}")
+    await answer_callback(callback)
