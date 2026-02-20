@@ -25,6 +25,7 @@ class BroadcastStates(StatesGroup):
 class AdminStates(StatesGroup):
     # Категории
     waiting_category_name = State()
+    waiting_category_rename = State()
     # Товары — добавление
     waiting_product_name = State()
     waiting_product_price = State()

@@ -37,7 +37,7 @@ def is_developer(user_id: int, user=None) -> bool:
     return user is not None and user.role == "developer"
 
 
-async def get_or_create_user(session: AsyncSession, tg_user, text: str = "") -> tuple:
+async def get_or_create_user(session: AsyncSession, tg_user, text: str = "", bot=None) -> tuple:
     user_id = tg_user.id
     stmt = select(User).where(User.telegram_id == user_id)
     result = await session.execute(stmt)
@@ -93,7 +93,8 @@ async def get_or_create_user(session: AsyncSession, tg_user, text: str = "") -> 
 
     try:
         from src.services.notifications import notify_user_registration
-        await notify_user_registration(session, user, tg_user)
+        if bot:
+            await notify_user_registration(session, user, bot)
     except Exception as e:
         logger.error("Registration notification error: %s", e)
 
@@ -123,7 +124,7 @@ async def get_welcome(session: AsyncSession, is_new: bool, name: str = "") -> st
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
     await state.clear()
-    user, is_new = await get_or_create_user(session, message.from_user, message.text or "")
+    user, is_new = await get_or_create_user(session, message.from_user, message.text or "", bot=message.bot)
     text = await get_welcome(session, is_new, message.from_user.first_name or "")
     try:
         await message.delete()

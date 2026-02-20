@@ -1,4 +1,4 @@
-aiogram>=3.23.0
+aiogram>=3.25.0
 aiofiles>=25.1.0
 python-dotenv>=1.2.1
 sqlalchemy>=2.0.45

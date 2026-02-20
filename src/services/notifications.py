@@ -1,6 +1,8 @@
 """Сервис уведомлений"""
 import logging
 
+from aiogram.types import InlineKeyboardMarkup
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,26 +12,35 @@ from src.database.models import Product, User
 logger = logging.getLogger(__name__)
 
 
-async def send_notification_to_chat(bot, message: str, parse_mode: str = "HTML") -> None:
+def _close_notification_kb() -> InlineKeyboardMarkup:
+    """Кнопка «Закрыть» для уведомлений (inline-импорт без циркулярных зависимостей)."""
+    from aiogram.types import InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_notification", style="danger")],
+    ])
+
+
+async def send_notification_to_chat(bot, message: str, parse_mode: str = "HTML", reply_markup=None) -> None:
     """Отправить уведомление в канал/чат поддержки."""
+    kb = reply_markup or _close_notification_kb()
     try:
         chat_id = settings.NOTIFICATIONS_CHAT_ID
         if not chat_id:
             for admin_id in settings.admin_ids_list:
                 try:
-                    await bot.send_message(admin_id, message, parse_mode=parse_mode)
+                    await bot.send_message(admin_id, message, parse_mode=parse_mode, reply_markup=kb)
                 except Exception as e:
                     logger.error("Error sending notification to admin %s: %s", admin_id, e)
             return
 
         try:
             target = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
-            await bot.send_message(target, message, parse_mode=parse_mode)
+            await bot.send_message(target, message, parse_mode=parse_mode, reply_markup=kb)
         except Exception as e:
             logger.error("Error sending notification to chat %s: %s", chat_id, e)
             for admin_id in settings.admin_ids_list:
                 try:
-                    await bot.send_message(admin_id, message, parse_mode=parse_mode)
+                    await bot.send_message(admin_id, message, parse_mode=parse_mode, reply_markup=kb)
                 except Exception:
                     pass
     except Exception as e:

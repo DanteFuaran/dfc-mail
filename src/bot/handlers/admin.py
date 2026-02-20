@@ -21,10 +21,14 @@ from src.bot.handlers.start import is_admin, is_developer
 from src.bot.keyboards import (
     admin_account_actions_kb,
     admin_accounts_menu_kb,
-    admin_catalog_kb,
+    admin_broadcast_kb,
+    admin_categories_list_kb,
+    admin_category_edit_kb,
     admin_menu_kb,
     admin_order_status_filter_kb,
     admin_orders_kb,
+    admin_products_list_kb,
+    admin_products_menu_kb,
     admin_role_kb,
     admin_settings_kb,
     admin_settings_keys_kb,
@@ -32,6 +36,7 @@ from src.bot.keyboards import (
     admin_users_kb,
     back_admin_kb,
     cancel_input_kb,
+    close_notification_kb,
     confirm_kb,
 )
 from src.bot.states import AdminStates
@@ -52,11 +57,25 @@ from src.database.models import (
 logger = logging.getLogger(__name__)
 router = Router()
 
-_back_btn = lambda cb: InlineKeyboardButton(text="◀️ Назад", callback_data=cb)
+_back_btn = lambda cb: InlineKeyboardButton(text="◀️ Назад", callback_data=cb, style="primary")
 
 
 def _admin_check(user_id: int) -> bool:
     return is_admin(user_id)
+
+
+# ═══════════════════════════════════════════════════
+# ЗАКРЫТИЕ УВЕДОМЛЕНИЙ
+# ═══════════════════════════════════════════════════
+
+@router.callback_query(F.data == "close_notification")
+async def close_notification(callback: CallbackQuery):
+    """Удалить сообщение-уведомление по кнопке «Закрыть»."""
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await answer_callback(callback)
 
 
 # ═══════════════════════════════════════════════════
@@ -198,9 +217,9 @@ def _order_detail_text(order, user, product) -> str:
 def _order_detail_kb(order) -> InlineKeyboardMarkup:
     rows = []
     if order.status == "ОЖИДАЕТ ОПЛАТЫ":
-        rows.append([InlineKeyboardButton(text="❌ Отменить", callback_data=f"adm:ocancel:{order.id}")])
+        rows.append([InlineKeyboardButton(text="❌ Отменить", callback_data=f"adm:ocancel:{order.id}", style="danger")])
     if order.status in ("ОЖИДАЕТ ОПЛАТЫ", "ОПЛАЧЕНО"):
-        rows.append([InlineKeyboardButton(text="✅ Выполнить", callback_data=f"adm:ocomplete:{order.id}")])
+        rows.append([InlineKeyboardButton(text="✅ Выполнить", callback_data=f"adm:ocomplete:{order.id}", style="success")])
     rows.append([_back_btn("adm:orders:all")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -358,16 +377,125 @@ async def orders_by_user(callback: CallbackQuery, state: FSMContext):
 
 
 # ═══════════════════════════════════════════════════
-# КАТАЛОГ — КАТЕГОРИИ
+# ТОВАРЫ — ПОДМЕНЮ
 # ═══════════════════════════════════════════════════
 
-@router.callback_query(F.data == "adm:catalog")
-async def catalog_menu(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "adm:products")
+async def products_submenu(callback: CallbackQuery, state: FSMContext):
     if not _admin_check(callback.from_user.id):
         return
     await state.clear()
-    await safe_edit(callback, "📂 <b>Управление каталогом</b>", admin_catalog_kb())
+    await safe_edit(callback, "📂 <b>Управление товарами</b>\n\nВыберите раздел:", admin_products_menu_kb())
     await answer_callback(callback)
+
+
+# ═══════════════════════════════════════════════════
+# КАТЕГОРИИ — СПИСОК С EDIT/DELETE
+# ═══════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:categories")
+async def categories_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not _admin_check(callback.from_user.id):
+        return
+    await state.clear()
+    cats = (await session.execute(select(Category).order_by(Category.name))).scalars().all()
+    if not cats:
+        from src.bot.keyboards import _back_menu_row
+        rows = [
+            [InlineKeyboardButton(text="➕ Добавить категорию", callback_data="adm:cat:add", style="success")],
+            _back_menu_row("adm:products"),
+        ]
+        await safe_edit(callback, "📂 <b>Категории</b>\n\nКатегорий пока нет.", InlineKeyboardMarkup(inline_keyboard=rows))
+        await answer_callback(callback)
+        return
+    await safe_edit(callback, "📂 <b>Категории</b>", admin_categories_list_kb(cats))
+    await answer_callback(callback)
+
+
+@router.callback_query(F.data.startswith("adm:cat:view:"))
+async def category_view(callback: CallbackQuery, session: AsyncSession):
+    """Просмотр категории — показываем товары в ней."""
+    if not _admin_check(callback.from_user.id):
+        return
+    cat_id = int(callback.data.split(":")[3])
+    cat = (await session.execute(select(Category).where(Category.id == cat_id))).scalar_one_or_none()
+    if not cat:
+        await answer_callback(callback, "❌ Категория не найдена.")
+        return
+    prods = (await session.execute(
+        select(Product).where(Product.category_id == cat_id).order_by(Product.name)
+    )).scalars().all()
+    text = f"📂 <b>{cat.name}</b>\n\n"
+    if prods:
+        text += "Товары в категории:\n"
+        for p in prods:
+            text += f"• {p.name} — {p.price:.2f}₽ (склад: {p.stock_count})\n"
+    else:
+        text += "Товаров в категории нет."
+    await safe_edit(callback, text, back_admin_kb("adm:categories"))
+    await answer_callback(callback)
+
+
+@router.callback_query(F.data.startswith("adm:cat:edit:"))
+async def category_edit_menu(callback: CallbackQuery, session: AsyncSession):
+    """Меню редактирования категории."""
+    if not _admin_check(callback.from_user.id):
+        return
+    cat_id = int(callback.data.split(":")[3])
+    cat = (await session.execute(select(Category).where(Category.id == cat_id))).scalar_one_or_none()
+    if not cat:
+        await answer_callback(callback, "❌ Категория не найдена.")
+        return
+    await safe_edit(callback, f"✏️ <b>Редактирование: {cat.name}</b>", admin_category_edit_kb(cat_id))
+    await answer_callback(callback)
+
+
+@router.callback_query(F.data.startswith("adm:cat:rename:"))
+async def category_rename_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Начать переименование категории."""
+    if not _admin_check(callback.from_user.id):
+        return
+    cat_id = int(callback.data.split(":")[3])
+    cat = (await session.execute(select(Category).where(Category.id == cat_id))).scalar_one_or_none()
+    if not cat:
+        await answer_callback(callback, "❌ Категория не найдена.")
+        return
+    await state.update_data(_menu_msg_id=callback.message.message_id, _rename_cat_id=cat_id)
+    await state.set_state(AdminStates.waiting_category_rename)
+    await safe_edit(
+        callback,
+        f"✏️ Текущее название: <b>{cat.name}</b>\n\n Введите новое название:",
+        cancel_input_kb("adm:categories"),
+    )
+    await answer_callback(callback)
+
+
+@router.message(AdminStates.waiting_category_rename)
+async def category_rename_finish(message: Message, state: FSMContext, session: AsyncSession):
+    if not _admin_check(message.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    msg_id = data.get("_menu_msg_id")
+    cat_id = data.get("_rename_cat_id")
+    await state.clear()
+
+    new_name = (message.text or "").strip()
+    if not new_name:
+        return
+
+    cat = (await session.execute(select(Category).where(Category.id == cat_id))).scalar_one_or_none()
+    if not cat:
+        return
+
+    old_name = cat.name
+    cat.name = new_name
+    await session.commit()
+    await message.bot.edit_message_text(
+        f"✅ Категория «{old_name}» переименована в «{new_name}».",
+        chat_id=message.chat.id, message_id=msg_id,
+        reply_markup=back_admin_kb("adm:categories"), parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "adm:cat:add")
@@ -376,7 +504,7 @@ async def cat_add_start(callback: CallbackQuery, state: FSMContext):
         return
     await state.update_data(_menu_msg_id=callback.message.message_id)
     await state.set_state(AdminStates.waiting_category_name)
-    await safe_edit(callback, "➕ Введите название новой категории:", cancel_input_kb("adm:catalog"))
+    await safe_edit(callback, "➕ Введите название новой категории:", cancel_input_kb("adm:categories"))
     await answer_callback(callback)
 
 
@@ -398,7 +526,7 @@ async def cat_add_finish(message: Message, state: FSMContext, session: AsyncSess
         await message.bot.edit_message_text(
             f"❌ Категория «{name}» уже существует.",
             chat_id=message.chat.id, message_id=msg_id,
-            reply_markup=back_admin_kb("adm:catalog"), parse_mode="HTML",
+            reply_markup=back_admin_kb("adm:categories"), parse_mode="HTML",
         )
         return
 
@@ -407,24 +535,8 @@ async def cat_add_finish(message: Message, state: FSMContext, session: AsyncSess
     await message.bot.edit_message_text(
         f"✅ Категория «{name}» создана.",
         chat_id=message.chat.id, message_id=msg_id,
-        reply_markup=back_admin_kb("adm:catalog"), parse_mode="HTML",
+        reply_markup=back_admin_kb("adm:categories"), parse_mode="HTML",
     )
-
-
-@router.callback_query(F.data == "adm:cat:del")
-async def cat_del_start(callback: CallbackQuery, session: AsyncSession):
-    if not _admin_check(callback.from_user.id):
-        return
-    cats = (await session.execute(select(Category).order_by(Category.name))).scalars().all()
-    if not cats:
-        await safe_edit(callback, "❌ Категорий нет.", back_admin_kb("adm:catalog"))
-        await answer_callback(callback)
-        return
-
-    rows = [[InlineKeyboardButton(text=f"🗑️ {c.name}", callback_data=f"adm:cat:confirmdel:{c.id}")] for c in cats]
-    rows.append([_back_btn("adm:catalog")])
-    await safe_edit(callback, "🗑️ Выберите категорию для удаления:", InlineKeyboardMarkup(inline_keyboard=rows))
-    await answer_callback(callback)
 
 
 @router.callback_query(F.data.startswith("adm:cat:confirmdel:"))
@@ -467,18 +579,43 @@ async def cat_del_execute(callback: CallbackQuery, session: AsyncSession):
     await session.delete(cat)
     await session.commit()
 
-    await safe_edit(callback, f"✅ Категория «{cat.name}» удалена.", back_admin_kb("adm:catalog"))
+    await safe_edit(callback, f"✅ Категория «{cat.name}» удалена.", back_admin_kb("adm:categories"))
     await answer_callback(callback)
 
 
 @router.callback_query(F.data.startswith("reject:cat:"))
 async def cat_del_cancel(callback: CallbackQuery):
-    await safe_edit(callback, "❌ Удаление отменено.", back_admin_kb("adm:catalog"))
+    await safe_edit(callback, "❌ Удаление отменено.", back_admin_kb("adm:categories"))
     await answer_callback(callback)
 
 
 # ═══════════════════════════════════════════════════
-# КАТАЛОГ — ТОВАРЫ: ДОБАВЛЕНИЕ
+# ТОВАРЫ — СПИСОК С EDIT/DELETE
+# ═══════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:prod:list")
+async def products_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not _admin_check(callback.from_user.id):
+        return
+    await state.clear()
+    prods = (await session.execute(
+        select(Product).where(Product.is_active == True).order_by(Product.name).limit(30)
+    )).scalars().all()
+    if not prods:
+        from src.bot.keyboards import _back_menu_row
+        rows = [
+            [InlineKeyboardButton(text="➕ Добавить товар", callback_data="adm:prod:add", style="success")],
+            _back_menu_row("adm:products"),
+        ]
+        await safe_edit(callback, "📦 <b>Товары</b>\n\nТоваров пока нет.", InlineKeyboardMarkup(inline_keyboard=rows))
+        await answer_callback(callback)
+        return
+    await safe_edit(callback, "📦 <b>Товары</b>", admin_products_list_kb(prods))
+    await answer_callback(callback)
+
+
+# ═══════════════════════════════════════════════════
+# ТОВАРЫ: ДОБАВЛЕНИЕ
 # ═══════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:prod:add")
@@ -487,7 +624,7 @@ async def prod_add_start(callback: CallbackQuery, state: FSMContext):
         return
     await state.update_data(_menu_msg_id=callback.message.message_id, _new_product={})
     await state.set_state(AdminStates.waiting_product_name)
-    await safe_edit(callback, "📦 <b>Новый товар</b>\n\n✏️ Введите название:", cancel_input_kb("adm:catalog"))
+    await safe_edit(callback, "📦 <b>Новый товар</b>\n\n✏️ Введите название:", cancel_input_kb("adm:products"))
     await answer_callback(callback)
 
 
@@ -503,7 +640,7 @@ async def prod_add_name(message: Message, state: FSMContext):
     await message.bot.edit_message_text(
         f"📦 Товар: <b>{prod['name']}</b>\n\n💰 Введите цену (₽):",
         chat_id=message.chat.id, message_id=msg_id,
-        reply_markup=cancel_input_kb("adm:catalog"), parse_mode="HTML",
+        reply_markup=cancel_input_kb("adm:products"), parse_mode="HTML",
     )
 
 
@@ -520,7 +657,7 @@ async def prod_add_price(message: Message, state: FSMContext, session: AsyncSess
     except (ValueError, TypeError, AttributeError):
         await message.bot.edit_message_text(
             "❌ Введите положительное число:", chat_id=message.chat.id, message_id=msg_id,
-            reply_markup=cancel_input_kb("adm:catalog"), parse_mode="HTML",
+            reply_markup=cancel_input_kb("adm:products"), parse_mode="HTML",
         )
         return
 
@@ -533,12 +670,12 @@ async def prod_add_price(message: Message, state: FSMContext, session: AsyncSess
         await message.bot.edit_message_text(
             "❌ Нет категорий. Сначала создайте категорию.",
             chat_id=message.chat.id, message_id=msg_id,
-            reply_markup=back_admin_kb("adm:catalog"), parse_mode="HTML",
+            reply_markup=back_admin_kb("adm:products"), parse_mode="HTML",
         )
         return
 
     rows = [[InlineKeyboardButton(text=c.name, callback_data=f"adm:prodcat:{c.id}")] for c in cats]
-    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="adm:catalog")])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="adm:products", style="danger")])
     await state.set_state(AdminStates.waiting_product_category)
     await message.bot.edit_message_text(
         f"📦 Товар: <b>{prod['name']}</b>\n💰 Цена: {price:.2f} ₽\n\n📂 Выберите категорию:",
@@ -558,7 +695,7 @@ async def prod_add_category(callback: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏩ Пропустить", callback_data="adm:prod:skip_desc")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:catalog")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:products", style="danger")],
     ])
     await safe_edit(callback, f"📦 <b>{prod['name']}</b>\n\n📝 Введите описание (или пропустите):", kb)
     await answer_callback(callback)
@@ -575,7 +712,7 @@ async def prod_add_desc(message: Message, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏩ Пропустить", callback_data="adm:prod:skip_fmt")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:catalog")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:products", style="danger")],
     ])
     await message.bot.edit_message_text(
         f"📦 <b>{prod['name']}</b>\n\n📋 Введите формат данных (или пропустите):",
@@ -594,7 +731,7 @@ async def prod_skip_desc(callback: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏩ Пропустить", callback_data="adm:prod:skip_fmt")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:catalog")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:products", style="danger")],
     ])
     await safe_edit(callback, f"📦 <b>{prod['name']}</b>\n\n📋 Введите формат данных (или пропустите):", kb)
     await answer_callback(callback)
@@ -611,7 +748,7 @@ async def prod_add_format(message: Message, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏩ Пропустить", callback_data="adm:prod:skip_rec")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:catalog")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:products", style="danger")],
     ])
     await message.bot.edit_message_text(
         f"📦 <b>{prod['name']}</b>\n\n💡 Введите рекомендации (или пропустите):",
@@ -630,7 +767,7 @@ async def prod_skip_fmt(callback: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏩ Пропустить", callback_data="adm:prod:skip_rec")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:catalog")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:products", style="danger")],
     ])
     await safe_edit(callback, f"📦 <b>{prod['name']}</b>\n\n💡 Введите рекомендации (или пропустите):", kb)
     await answer_callback(callback)
@@ -674,38 +811,15 @@ async def _save_product(prod: dict, session: AsyncSession, bot, chat_id: int, ms
     await bot.edit_message_text(
         f"✅ Товар <b>«{product.name}»</b> создан!\n\n"
         f"💰 Цена: {product.price:.2f} ₽\n"
-        f"Добавьте аккаунты через меню каталога.",
+        f"Добавьте аккаунты через меню склада.",
         chat_id=chat_id, message_id=msg_id,
-        reply_markup=back_admin_kb("adm:catalog"), parse_mode="HTML",
+        reply_markup=back_admin_kb("adm:products"), parse_mode="HTML",
     )
 
 
 # ═══════════════════════════════════════════════════
-# КАТАЛОГ — ТОВАРЫ: РЕДАКТИРОВАНИЕ
+# ТОВАРЫ: РЕДАКТИРОВАНИЕ
 # ═══════════════════════════════════════════════════
-
-@router.callback_query(F.data == "adm:prod:edit")
-async def prod_edit_start(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    if not _admin_check(callback.from_user.id):
-        return
-    await state.clear()
-    prods = (await session.execute(
-        select(Product).where(Product.is_active == True).order_by(Product.name).limit(30)
-    )).scalars().all()
-
-    if not prods:
-        await safe_edit(callback, "❌ Нет активных товаров.", back_admin_kb("adm:catalog"))
-        await answer_callback(callback)
-        return
-
-    rows = [
-        [InlineKeyboardButton(text=f"✏️ {p.name} ({p.price:.2f}₽)", callback_data=f"adm:pedit:{p.id}")]
-        for p in prods
-    ]
-    rows.append([_back_btn("adm:catalog")])
-    await safe_edit(callback, "✏️ <b>Выберите товар:</b>", InlineKeyboardMarkup(inline_keyboard=rows))
-    await answer_callback(callback)
-
 
 @router.callback_query(F.data.startswith("adm:pedit:"))
 async def prod_edit_select(callback: CallbackQuery, session: AsyncSession):
@@ -739,8 +853,9 @@ async def prod_edit_select(callback: CallbackQuery, session: AsyncSession):
         [InlineKeyboardButton(
             text=f"{'🔴 Деактивировать' if product.is_active else '🟢 Активировать'}",
             callback_data=f"adm:ptoggle:{pid}",
+            style="danger" if product.is_active else "success",
         )],
-        [_back_btn("adm:prod:edit")],
+        [_back_btn("adm:prod:list")],
     ]
     await safe_edit(callback, text, InlineKeyboardMarkup(inline_keyboard=rows))
     await answer_callback(callback)
@@ -757,7 +872,7 @@ async def prod_toggle_active(callback: CallbackQuery, session: AsyncSession):
     product.is_active = not product.is_active
     await session.commit()
     state_text = "активирован ✅" if product.is_active else "деактивирован 🔴"
-    await safe_edit(callback, f"Товар <b>{product.name}</b> {state_text}.", back_admin_kb("adm:prod:edit"))
+    await safe_edit(callback, f"Товар <b>{product.name}</b> {state_text}.", back_admin_kb("adm:prod:list"))
     await answer_callback(callback)
 
 
@@ -856,27 +971,8 @@ async def prod_edit_value(message: Message, state: FSMContext, session: AsyncSes
 
 
 # ═══════════════════════════════════════════════════
-# КАТАЛОГ — ТОВАРЫ: УДАЛЕНИЕ
+# ТОВАРЫ: УДАЛЕНИЕ
 # ═══════════════════════════════════════════════════
-
-@router.callback_query(F.data == "adm:prod:del")
-async def prod_del_start(callback: CallbackQuery, session: AsyncSession):
-    if not _admin_check(callback.from_user.id):
-        return
-    prods = (await session.execute(select(Product).order_by(Product.name))).scalars().all()
-    if not prods:
-        await safe_edit(callback, "❌ Товаров нет.", back_admin_kb("adm:catalog"))
-        await answer_callback(callback)
-        return
-
-    rows = [
-        [InlineKeyboardButton(text=f"🗑️ {p.name}", callback_data=f"adm:prod:confirmdel:{p.id}")]
-        for p in prods
-    ]
-    rows.append([_back_btn("adm:catalog")])
-    await safe_edit(callback, "🗑️ <b>Выберите товар для удаления:</b>", InlineKeyboardMarkup(inline_keyboard=rows))
-    await answer_callback(callback)
-
 
 @router.callback_query(F.data.startswith("adm:prod:confirmdel:"))
 async def prod_del_confirm(callback: CallbackQuery, session: AsyncSession):
@@ -906,18 +1002,18 @@ async def prod_del_execute(callback: CallbackQuery, session: AsyncSession):
     await session.execute(sa_delete(Account).where(Account.product_id == pid))
     await session.delete(product)
     await session.commit()
-    await safe_edit(callback, f"✅ Товар «{product.name}» удалён.", back_admin_kb("adm:catalog"))
+    await safe_edit(callback, f"✅ Товар «{product.name}» удалён.", back_admin_kb("adm:prod:list"))
     await answer_callback(callback)
 
 
 @router.callback_query(F.data.startswith("reject:prod:"))
 async def prod_del_cancel(callback: CallbackQuery):
-    await safe_edit(callback, "❌ Удаление отменено.", back_admin_kb("adm:catalog"))
+    await safe_edit(callback, "❌ Удаление отменено.", back_admin_kb("adm:prod:list"))
     await answer_callback(callback)
 
 
 # ═══════════════════════════════════════════════════
-# АККАУНТЫ
+# АККАУНТЫ (СКЛАД)
 # ═══════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:accounts")
@@ -927,10 +1023,10 @@ async def accounts_menu(callback: CallbackQuery, session: AsyncSession, state: F
     await state.clear()
     prods = (await session.execute(select(Product).order_by(Product.name))).scalars().all()
     if not prods:
-        await safe_edit(callback, "❌ Товаров нет. Сначала добавьте товар.", back_admin_kb("adm:catalog"))
+        await safe_edit(callback, "❌ Товаров нет. Сначала добавьте товар.", back_admin_kb("adm:products"))
         await answer_callback(callback)
         return
-    await safe_edit(callback, "📦 <b>Управление аккаунтами</b>\n\nВыберите товар:", admin_accounts_menu_kb(prods))
+    await safe_edit(callback, "📊 <b>Управление складом</b>\n\nВыберите товар:", admin_accounts_menu_kb(prods))
     await answer_callback(callback)
 
 
@@ -1077,10 +1173,11 @@ async def account_delete_menu(callback: CallbackQuery, session: AsyncSession):
         [InlineKeyboardButton(
             text=f"🗑️ {a.account_data[:30]}{'...' if len(a.account_data) > 30 else ''}",
             callback_data=f"adm:accdel:{a.id}:{pid}",
+            style="danger",
         )]
         for a in accs
     ]
-    rows.append([InlineKeyboardButton(text="🗑️ Удалить ВСЕ", callback_data=f"adm:accdelall:{pid}")])
+    rows.append([InlineKeyboardButton(text="🗑️ Удалить ВСЕ", callback_data=f"adm:accdelall:{pid}", style="danger")])
     rows.append([_back_btn(f"adm:acc:prod:{pid}")])
     await safe_edit(callback, "🗑️ <b>Выберите аккаунт:</b>", InlineKeyboardMarkup(inline_keyboard=rows))
     await answer_callback(callback)
@@ -1213,7 +1310,6 @@ async def user_detail(callback: CallbackQuery, session: AsyncSession):
 
 def _user_detail_text(user) -> str:
     status = "🔒 Заблокирован" if user.is_blocked else "✅ Активен"
-    orders_count = len(user.orders) if hasattr(user, 'orders') and user.orders else 0
     return (
         f"👤 <b>Пользователь</b>\n\n"
         f"🆔 ID: <code>{user.telegram_id}</code>\n"
@@ -1303,29 +1399,6 @@ async def user_balance_start(callback: CallbackQuery, state: FSMContext):
     await answer_callback(callback)
 
 
-@router.callback_query(F.data == "adm:topup_self")
-async def topup_self(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    if not _admin_check(callback.from_user.id):
-        return
-    user = (await session.execute(
-        select(User).where(User.telegram_id == callback.from_user.id)
-    )).scalar_one_or_none()
-    if not user:
-        return
-    await state.update_data(
-        _menu_msg_id=callback.message.message_id,
-        _balance_user_id=user.id,
-        _is_self_topup=True,
-    )
-    await state.set_state(AdminStates.waiting_balance_amount)
-    await safe_edit(
-        callback,
-        f"💰 Текущий баланс: {user.balance:.2f} ₽\n\nВведите сумму пополнения:",
-        cancel_input_kb("menu:admin"),
-    )
-    await answer_callback(callback)
-
-
 @router.message(AdminStates.waiting_balance_amount)
 async def user_balance_finish(message: Message, state: FSMContext, session: AsyncSession):
     if not _admin_check(message.from_user.id):
@@ -1334,7 +1407,6 @@ async def user_balance_finish(message: Message, state: FSMContext, session: Asyn
     data = await state.get_data()
     msg_id = data.get("_menu_msg_id")
     uid = data.get("_balance_user_id")
-    is_self = data.get("_is_self_topup", False)
     await state.clear()
 
     try:
@@ -1353,11 +1425,10 @@ async def user_balance_finish(message: Message, state: FSMContext, session: Asyn
     user.balance += amount
     await session.commit()
 
-    target_back = "menu:admin" if is_self else "adm:users"
     await message.bot.edit_message_text(
         f"✅ Баланс пользователя {user.first_name or user.telegram_id}: <b>{user.balance:.2f} ₽</b> ({'+' if amount >= 0 else ''}{amount:.2f})",
         chat_id=message.chat.id, message_id=msg_id,
-        reply_markup=back_admin_kb(target_back), parse_mode="HTML",
+        reply_markup=back_admin_kb("adm:users"), parse_mode="HTML",
     )
 
     try:
