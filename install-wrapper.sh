@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Защита от запуска из удалённой директории
+cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+
 REPO_URL="https://raw.githubusercontent.com/DanteFuaran/dfc-mail/main/install.sh"
 INSTALL_SCRIPT="/tmp/dfc-mail-install.sh"
 
