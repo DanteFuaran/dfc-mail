@@ -838,6 +838,10 @@ update_env_var "$ENV_FILE" "WEBHOOK_PORT" "$_wp"
 (cd "$PROJECT_DIR"; docker compose up -d >/dev/null 2>&1) &
 show_spinner "Запуск сервисов"
 
+# Инфраструктура развёрнута — отключаем деструктивный cleanup
+INSTALL_COMPLETED=true
+INSTALL_STARTED=false
+
 # Ожидание запуска
 echo
 show_spinner_until_log "dfc-mail" "Bot starting up" "Запуск бота" 90 && BOT_START_RESULT=0 || BOT_START_RESULT=$?
@@ -865,8 +869,8 @@ elif [ ${BOT_START_RESULT:-1} -eq 2 ]; then
     echo
     echo -e "${DARKGRAY}Enter: Показать логи     Esc: Пропустить${NC}"
     tput civis 2>/dev/null || true
-    local key 2>/dev/null || true
-    read -s -n 1 key
+    key=""
+    read -s -n 1 key || true
     if [[ "$key" != $'\x1b' ]]; then
         echo
         docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 dfc-mail
@@ -882,7 +886,8 @@ else
     echo
     echo -e "${DARKGRAY}Enter: Показать логи     Esc: Пропустить${NC}"
     tput civis 2>/dev/null || true
-    read -s -n 1 key
+    key=""
+    read -s -n 1 key || true
     if [[ "${key:-}" != $'\x1b' ]]; then
         echo
         docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 dfc-mail
