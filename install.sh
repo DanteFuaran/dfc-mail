@@ -523,6 +523,7 @@ cleanup_on_error() {
         if command -v docker &>/dev/null && [ -d "$PROJECT_DIR" ]; then
             cd "$PROJECT_DIR" 2>/dev/null && docker compose down >/dev/null 2>&1 || true
         fi
+        docker network rm dfc-mail-network >/dev/null 2>&1 || true
 
         if [ -d "$PROJECT_DIR" ]; then
             rm -rf "$PROJECT_DIR" 2>/dev/null || true
@@ -629,10 +630,7 @@ show_spinner "Настройка системы"
     mkdir -p "$PROJECT_DIR"/{logs,backups}
     chmod 755 "$PROJECT_DIR/logs" "$PROJECT_DIR/backups"
 
-    # Docker сеть
-    if ! docker network ls | grep -q "dfc-mail-network"; then
-        docker network create dfc-mail-network 2>/dev/null || true
-    fi
+    # Docker сеть создаётся автоматически через docker compose
 ) &
 show_spinner "Подготовка целевой директории"
 
@@ -695,11 +693,22 @@ if [ -z "$BOT_TOKEN" ]; then
 fi
 update_env_var "$ENV_FILE" "BOT_TOKEN" "$BOT_TOKEN"
 
-# BOT_NAME
-reading_inline "Введите username бота (без @, напр. my_mail_bot):" BOT_NAME
+# BOT_NAME — автоопределение через Telegram API
+BOT_NAME=""
+_tg_response=$(curl -sf "https://api.telegram.org/bot${BOT_TOKEN}/getMe" 2>/dev/null || true)
+if [ -n "$_tg_response" ]; then
+    _detected=$(echo "$_tg_response" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+    if [ -n "$_detected" ]; then
+        BOT_NAME="$_detected"
+        print_success "Username бота определён автоматически: @${BOT_NAME}"
+    fi
+fi
 if [ -z "$BOT_NAME" ]; then
-    print_error "BOT_NAME не может быть пустым!"
-    exit 1
+    reading_inline "Введите username бота (без @, напр. my_mail_bot):" BOT_NAME
+    if [ -z "$BOT_NAME" ]; then
+        print_error "BOT_NAME не может быть пустым!"
+        exit 1
+    fi
 fi
 update_env_var "$ENV_FILE" "BOT_NAME" "$BOT_NAME"
 
@@ -783,6 +792,7 @@ show_spinner "Создание структуры папок"
     cd "$PROJECT_DIR"
     docker compose down >/dev/null 2>&1 || true
     docker volume rm dfc-mail-db-data >/dev/null 2>&1 || true
+    docker network rm dfc-mail-network >/dev/null 2>&1 || true
 ) &
 show_spinner "Очистка старых данных БД"
 
